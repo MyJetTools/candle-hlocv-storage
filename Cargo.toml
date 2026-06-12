@@ -1,0 +1,14 @@
+[package]
+name = "candle-hlocv-storage"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rust-extensions = { tag = "0.1.5", git = "https://github.com/MyJetTools/rust-extensions.git" }
+tokio = { version = "*", features = ["rt", "fs", "sync", "io-util", "macros"] }
+serde = { version = "*", features = ["derive"] }
+serde_yaml = "*"
+
+[dev-dependencies]
+tokio = { version = "*", features = ["full"] }
+tempfile = "*"
