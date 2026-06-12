@@ -85,6 +85,10 @@ impl FileIndex {
         tokio::fs::rename(&tmp_path, path).await
     }
 
+    pub fn items(&self) -> &[IndexEntry] {
+        &self.items
+    }
+
     pub fn get(&self, instrument_id: &str, candle_type: CandleType, year: u16) -> Option<u64> {
         self.lookup
             .get(instrument_id)?

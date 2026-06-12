@@ -285,6 +285,101 @@ impl CandleHLOCWriter {
         Ok(result)
     }
 
+    // --- Index ---
+
+    /// Snapshot of the index: which (instrument_id, candle_type, year) blocks
+    /// exist. Lets the consumer enumerate stored instruments and year bounds
+    /// without reading the data file.
+    pub async fn get_index(&self) -> Vec<IndexEntry> {
+        self.inner.lock().await.index.items().to_vec()
+    }
+
+    // --- Erase (zero out slot ranges; a zeroed slot reads back as `None`) ---
+
+    pub async fn erase_minute_candles(
+        &self,
+        instrument_id: &str,
+        from: IntervalKey<MinuteKey>,
+        to: IntervalKey<MinuteKey>,
+    ) -> Result<u64, std::io::Error> {
+        let mut erased = 0;
+        for year in minute::year_of(from)..=minute::year_of(to) {
+            let slot_from = if year == minute::year_of(from) {
+                minute::slot_of(from)
+            } else {
+                0
+            };
+            let slot_to = if year == minute::year_of(to) {
+                minute::slot_of(to)
+            } else {
+                minute::last_slot_of_year(year)
+            };
+            if slot_from > slot_to {
+                continue;
+            }
+            erased += self
+                .erase_slots(instrument_id, CandleType::Minute, year, slot_from, slot_to)
+                .await?;
+        }
+        Ok(erased)
+    }
+
+    pub async fn erase_hour_candles(
+        &self,
+        instrument_id: &str,
+        from: IntervalKey<HourKey>,
+        to: IntervalKey<HourKey>,
+    ) -> Result<u64, std::io::Error> {
+        let mut erased = 0;
+        for year in hour::year_of(from)..=hour::year_of(to) {
+            let slot_from = if year == hour::year_of(from) {
+                hour::slot_of(from)
+            } else {
+                0
+            };
+            let slot_to = if year == hour::year_of(to) {
+                hour::slot_of(to)
+            } else {
+                hour::last_slot_of_year(year)
+            };
+            if slot_from > slot_to {
+                continue;
+            }
+            erased += self
+                .erase_slots(instrument_id, CandleType::Hour, year, slot_from, slot_to)
+                .await?;
+        }
+        Ok(erased)
+    }
+
+    pub async fn erase_day_candles(
+        &self,
+        instrument_id: &str,
+        from: IntervalKey<DayKey>,
+        to: IntervalKey<DayKey>,
+    ) -> Result<u64, std::io::Error> {
+        let mut erased = 0;
+        for year in day::year_of(from)..=day::year_of(to) {
+            let slot_from = if year == day::year_of(from) {
+                day::slot_of(from)
+            } else {
+                0
+            };
+            let slot_to = if year == day::year_of(to) {
+                day::slot_of(to)
+            } else {
+                day::last_slot_of_year(year)
+            };
+            if slot_from > slot_to {
+                continue;
+            }
+            erased += self
+                .erase_slots(instrument_id, CandleType::Day, year, slot_from, slot_to)
+                .await?;
+        }
+        Ok(erased)
+    }
+
     // --- Shared I/O ---
 
     async fn write_candle(
@@ -366,6 +461,46 @@ impl CandleHLOCWriter {
             }
         }
         Ok(result)
+    }
+
+    /// Zeroes slots `[slot_from..=slot_to]` of one year block; returns how many
+    /// non-empty slots were actually erased (the range is read first to count).
+    async fn erase_slots(
+        &self,
+        instrument_id: &str,
+        candle_type: CandleType,
+        year: u16,
+        slot_from: u32,
+        slot_to: u32,
+    ) -> Result<u64, std::io::Error> {
+        let mut inner = self.inner.lock().await;
+
+        let Some(block_offset) = inner.index.get(instrument_id, candle_type, year) else {
+            return Ok(0);
+        };
+
+        let count = (slot_to - slot_from + 1) as usize;
+        let range_offset = block_offset + slot_from as u64 * CANDLE_SIZE as u64;
+
+        let mut buf = vec![0u8; count * CANDLE_SIZE];
+        inner.data.seek(SeekFrom::Start(range_offset)).await?;
+        inner.data.read_exact(&mut buf).await?;
+
+        let erased = buf
+            .chunks_exact(CANDLE_SIZE)
+            .filter(|chunk| {
+                let chunk: &[u8; CANDLE_SIZE] = (*chunk).try_into().unwrap();
+                !CandleModel::is_empty_slot(chunk)
+            })
+            .count() as u64;
+        if erased == 0 {
+            return Ok(0);
+        }
+
+        buf.fill(0);
+        inner.data.seek(SeekFrom::Start(range_offset)).await?;
+        inner.data.write_all(&buf).await?;
+        Ok(erased)
     }
 }
 
@@ -686,6 +821,144 @@ mod tests {
         assert_eq!(result[0].1, candle(1.0, 1));
         assert_eq!(result[1].0.to_i64(), 202602);
         assert_eq!(result[1].1, candle(2.0, 2));
+    }
+
+    #[tokio::test]
+    async fn get_index_enumerates_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = CandleHLOCWriter::open(dir.path().join("candles")).await.unwrap();
+
+        assert!(writer.get_index().await.is_empty());
+
+        writer
+            .write_minute_candle(
+                "BTCUSDT",
+                2026,
+                IntervalKey::from_i64(202606121234),
+                candle(1.0, 1),
+            )
+            .await
+            .unwrap();
+        writer
+            .write_day_candle("ETHUSDT", 2025, IntervalKey::from_i64(20250612), candle(2.0, 2))
+            .await
+            .unwrap();
+
+        let index = writer.get_index().await;
+        assert_eq!(index.len(), 2);
+        assert_eq!(index[0].instrument_id, "BTCUSDT");
+        assert_eq!(index[0].candle_type, CandleType::Minute);
+        assert_eq!(index[0].year, 2026);
+        assert_eq!(index[1].instrument_id, "ETHUSDT");
+        assert_eq!(index[1].candle_type, CandleType::Day);
+        assert_eq!(index[1].year, 2025);
+    }
+
+    #[tokio::test]
+    async fn erase_zeroes_range_and_keeps_neighbours() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = CandleHLOCWriter::open(dir.path().join("candles")).await.unwrap();
+
+        for (i, key) in [202606121200i64, 202606121201, 202606121202, 202606121203]
+            .into_iter()
+            .enumerate()
+        {
+            writer
+                .write_minute_candle(
+                    "BTCUSDT",
+                    2026,
+                    IntervalKey::from_i64(key),
+                    candle(1.0 + i as f64, 1),
+                )
+                .await
+                .unwrap();
+        }
+
+        let erased = writer
+            .erase_minute_candles(
+                "BTCUSDT",
+                IntervalKey::from_i64(202606121201),
+                IntervalKey::from_i64(202606121202),
+            )
+            .await
+            .unwrap();
+        assert_eq!(erased, 2);
+
+        let left = writer
+            .read_minute_candles(
+                "BTCUSDT",
+                IntervalKey::from_i64(202606121200),
+                IntervalKey::from_i64(202606121203),
+            )
+            .await
+            .unwrap();
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0].0.to_i64(), 202606121200);
+        assert_eq!(left[1].0.to_i64(), 202606121203);
+
+        // erasing an already-empty range (and a missing instrument) is a no-op
+        assert_eq!(
+            writer
+                .erase_minute_candles(
+                    "BTCUSDT",
+                    IntervalKey::from_i64(202606121201),
+                    IntervalKey::from_i64(202606121202),
+                )
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            writer
+                .erase_minute_candles(
+                    "ETHUSDT",
+                    IntervalKey::from_i64(202606121200),
+                    IntervalKey::from_i64(202606121203),
+                )
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn erase_crosses_year_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = CandleHLOCWriter::open(dir.path().join("candles")).await.unwrap();
+
+        writer
+            .write_day_candle("BTCUSDT", 2025, IntervalKey::from_i64(20251230), candle(1.0, 1))
+            .await
+            .unwrap();
+        writer
+            .write_day_candle("BTCUSDT", 2026, IntervalKey::from_i64(20260102), candle(2.0, 2))
+            .await
+            .unwrap();
+        writer
+            .write_day_candle("BTCUSDT", 2026, IntervalKey::from_i64(20260110), candle(3.0, 3))
+            .await
+            .unwrap();
+
+        let erased = writer
+            .erase_day_candles(
+                "BTCUSDT",
+                IntervalKey::from_i64(20251229),
+                IntervalKey::from_i64(20260105),
+            )
+            .await
+            .unwrap();
+        assert_eq!(erased, 2);
+
+        let left = writer
+            .read_day_candles(
+                "BTCUSDT",
+                IntervalKey::from_i64(20251201),
+                IntervalKey::from_i64(20260131),
+            )
+            .await
+            .unwrap();
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].0.to_i64(), 20260110);
     }
 
     #[tokio::test]
