@@ -89,6 +89,10 @@ impl FileIndex {
         &self.items
     }
 
+    pub fn get_all_instruments(&self) -> Vec<String> {
+        self.lookup.keys().cloned().collect()
+    }
+
     pub fn get(&self, instrument_id: &str, candle_type: CandleType, year: u16) -> Option<u64> {
         self.lookup
             .get(instrument_id)?

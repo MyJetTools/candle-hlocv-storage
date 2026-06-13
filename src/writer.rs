@@ -47,6 +47,12 @@ impl CandleHLOCWriter {
         })
     }
 
+    /// Returns the list of all instruments that have at least one block in the index.
+    pub async fn get_all_instruments(&self) -> Vec<String> {
+        let inner = self.inner.lock().await;
+        inner.index.get_all_instruments()
+    }
+
     // --- Minute ---
 
     pub async fn write_minute_candle(
