@@ -4,6 +4,7 @@ version = "0.1.1"
 edition = "2021"
 
 [dependencies]
+ahash = "*"
 rust-extensions = { tag = "0.1.5", git = "https://github.com/MyJetTools/rust-extensions.git" }
 tokio = { version = "*", features = ["rt", "fs", "sync", "io-util", "macros"] }
 serde = { version = "*", features = ["derive"] }

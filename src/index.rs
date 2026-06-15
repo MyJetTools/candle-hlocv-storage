@@ -1,5 +1,6 @@
-use std::collections::HashMap;
 use std::path::Path;
+
+use ahash::AHashMap;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -39,7 +40,7 @@ struct IndexFileContent {
 #[derive(Default)]
 pub struct FileIndex {
     items: Vec<IndexEntry>,
-    lookup: HashMap<String, HashMap<(CandleType, u16), u64>>,
+    lookup: AHashMap<String, AHashMap<(CandleType, u16), u64>>,
 }
 
 impl FileIndex {
